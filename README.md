@@ -14,7 +14,7 @@ Get your team API-key from [Detectify Team Settings](https://detectify.com/dashb
 
 ```
 $ export DETECTIFY_API_KEY="xyz"
-$ ln -s detectify /usr/local/bin/detectify
+$ ln -s "$(pwd)/detectify" /usr/local/bin/detectify
 
 $ detectify help
 ```
