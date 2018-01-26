@@ -1,0 +1,196 @@
+#!/bin/bash
+
+set -euo pipefail
+
+die () {
+  echo >&2 "$@"
+  exit 1
+}
+
+which curl > /dev/null || die 'error: you need curl'
+which jq > /dev/null || die 'error: you need jq'
+which printf > /dev/null || die 'error: you need printf'
+
+init () {
+  if [ "${_api_key}" == "" ]; then
+    die 'error: DETECTIFY_API_KEY env-variable required'
+  fi
+}
+
+_api_key="${DETECTIFY_API_KEY:-}"
+_api_header="X-Detectify-Key: ${_api_key}"
+
+_version="1.0"
+_command="${1-help}"
+_api_url="https://api.detectify.com/rest/v2"
+
+domains_args () {
+  while [ $# -gt 1 ]; do
+  case "$2" in
+    --raw)
+      _raw="1"
+      ;;
+    --status)
+      shift
+      _status="${2}"
+      ;;
+    --status=*)
+      _status="${2#*=}"
+      ;;
+    *)
+      ;;
+    esac
+    shift
+  done
+}
+
+profiles_args () {
+  while [ $# -gt 1 ]; do
+  case "$2" in
+    --raw)
+      _raw="1"
+      ;;
+    *)
+	  if [ "${_client}" == "" ]; then
+        _client="$2"
+      fi
+      ;;
+    esac
+    shift
+  done
+}
+
+status_args () {
+  while [ $# -gt 1 ]; do
+  case "$2" in
+    --raw)
+      _raw="1"
+      ;;
+    *)
+	  if [ "${_profile}" == "" ]; then
+        _profile="$2"
+      fi
+      ;;
+    esac
+    shift
+  done
+}
+
+get_domain_token () {
+  _token=$(curl -s -H "${_api_header}" "${_api_url}/domains/" | jq -r --arg client "$1" '.[] | select(.name == $client) | .token')
+}
+
+get_profile_token () {
+  _token=$(curl -s -H "${_api_header}" "${_api_url}/profiles/" | jq -r --arg profile "$1" '.[] | select(.name == $profile) | .token')
+}
+
+doc () {
+  printf '%-30s \e[38;5;22m%s\e[m\n' "${1:-}" "${2:-}";
+}
+
+case ${_command} in
+  version)
+    echo "v${_version}"
+  ;;
+  help)
+    echo ''
+    echo "detectify-cli v${_version}"
+    echo ''
+    doc 'help' 'this list of help'
+    doc 'version' 'show version of detectify-cli'
+    echo ''
+    doc '[--raw]' 'show raw JSON response'
+    echo ''
+    doc 'domains [--status=*]' 'list all domains, statuses: verified/unverified'
+    doc 'profiles' 'list all profiles'
+    doc 'profiles <domain>' 'list profiles for the domain'
+    doc 'start <profile>' 'start a scan on the profile'
+    doc 'stop <profile>' 'stop a scan on the profile'
+    doc 'status <profile>' 'status of the current scan'
+    echo ''
+    echo ''
+  ;;
+  domains)
+    init
+    _raw=""
+    _status=""
+    domains_args $@
+    res=$(curl -s -H "${_api_header}" "${_api_url}/domains/")
+    _jq_params=".name"
+    if [ "${_raw}" == "1" ]; then
+      _jq_params="."
+    fi
+    if [ "${_status}" != "" ]; then
+      echo "${res}" | jq -r --arg status "${_status}" '.[] | select(.status==$status)' | jq -r "${_jq_params}"
+    else
+      echo "${res}" | jq -r '.[]' | jq -r "${_jq_params}"
+    fi
+  ;;
+  profiles)
+    init
+    _raw=""
+    _client=""
+    _token=""
+    profiles_args $@
+    if [ "${_client}" != "" ]; then
+      get_domain_token "${_client}"
+      if [ "${_token}" == "" ]; then
+        die 'error: domain not found'
+      fi
+      _token="${_token}/"
+    fi
+    res=$(curl -s -H "${_api_header}" "${_api_url}/profiles/${_token}")
+    _jq_params=".name"
+    if [ "${_raw}" == "1" ]; then
+      _jq_params="."
+    fi
+    echo "${res}" | jq -r '.[]' | jq -r "${_jq_params}"
+  ;;
+  status|start|stop)
+    _command="$1"
+    init
+    _raw=""
+    _profile=""
+    _token=""
+    status_args $@
+    _method="GET"
+    _get_code="0"
+    case "${_command}" in
+      start)
+        _method="POST"
+        _get_code="1"
+        ;;
+      stop)
+        _method="DELETE"
+        _get_code="1"
+        ;;
+    esac
+    if [ "${_profile}" != "" ]; then
+      get_profile_token "${_profile}"
+      if [ "${_token}" == "" ]; then
+        die 'error: domain not found'
+      fi
+      _token="${_token}/"
+    fi
+    if [ "${_get_code}" == "1" ]; then
+      res=$(curl --write-out "%{http_code}\n" --silent --output /dev/null -s -X "${_method}" -H "${_api_header}" "${_api_url}/scans/${_token}")
+      case "${res}" in
+        409) die 'error: conflict' ;;
+        404) die 'error: cannot stop, not started' ;;
+        423) die 'error: locked. domain not verified' ;;
+        200|202) echo 'success' ;;
+        *) die "error: ${res}" ;;
+      esac
+    else
+      _jq_params='. | (.status + ": " + .phase)'
+      if [ "${_raw}" == "1" ]; then
+        _jq_params="."
+      fi
+      res=$(curl -s -X "${_method}" -H "${_api_header}" "${_api_url}/scans/${_token}" | jq -r "${_jq_params}")
+      echo "${res}"
+    fi
+  ;;
+  *)
+    die "Unknown command"
+  ;;
+esac
